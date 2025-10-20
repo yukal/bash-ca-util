@@ -1,0 +1,41 @@
+#!/usr/bin/bash
+
+# If any command returns a non-zero exit code, the script will exit immediately.
+set -euo pipefail
+
+./cautil init
+./cautil client am
+./cautil server osbb.loc
+./cautil check
+./cautil list
+
+./cautil client am       # chose "n" (no)
+./cautil client am       # chose "y" (yes)
+./cautil server osbb.loc # chose "n" (no)
+./cautil server osbb.loc # chose "y" (yes)
+
+./cautil check
+./cautil list client
+./cautil list server
+./cautil list
+
+./cautil revoke 03       # chose "n" (no)
+./cautil revoke 03       # chose "y" (yes)
+./cautil revoke 03       # --
+./cautil revoke 04       # chose "n" (no)
+./cautil revoke 04       # chose "y" (yes)
+./cautil revoke 04       # --
+
+./cautil client am       # (chose "y" yes)
+./cautil server osbb.loc # (chose "y" yes)
+
+./cautil check
+./cautil find am-client
+./cautil find osbb.loc
+./cautil list
+
+# Should be:
+#
+# == Certificate list ==
+#  – [server]  V  06   <TIMESTAMP>   UA.Kyiv HomeWorks(IT)  osbb.loc
+#  – [client]  V  05   <TIMESTAMP>   UA.Kyiv HomeWorks(IT)  am-client
