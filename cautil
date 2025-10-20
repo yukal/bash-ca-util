@@ -800,7 +800,7 @@ Usage() {
     echo "  client <name>                 – Generate client certificate (e.g. client1)."
     echo "  revoke <SN>                   – Revoke a certificate (irreversible)."
     echo "  list <role>?                  – Show list of certificates (role: server|client)."
-    echo "  find <CN>?                    – Find certificate (e.g. osbb.loc)."
+    echo "  find <CN>                     – Find certificate (e.g. osbb.loc)."
     echo "  check <CN>?                   – Run validation scenario for all or one certificate (e.g. osbb.loc)."
     echo "  deploy <domain>?              – Deploy generated certificates into the project and update trusted CA."
     echo "  test <client_name> <domain>   – Test connection using generated certificates."
