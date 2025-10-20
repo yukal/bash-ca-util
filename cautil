@@ -1,0 +1,1156 @@
+#!/usr/bin/bash
+
+# If any command returns a non-zero exit code, the script will exit immediately.
+set -eo pipefail
+
+# Directory and domain settings
+APP_DIR="${PWD%/}"
+
+CA_COMMON_NAME="HomeWorks Root CA"
+CA_DIR="$APP_DIR/ca"
+CA_TRUST_DIR="/etc/pki/ca-trust/source/anchors" # (Fedora)
+CRL_DIR="crl"
+ISSUED_DIR="issued"
+SERVER_DIR="$APP_DIR/server"
+CLIENT_DIR="$APP_DIR/client"
+HTDOCS_DIR="/var/www" # /var/www/<your_domain>/.ssl
+
+# User group for WEB
+WEB_GROUP="nginx"
+
+# Colors
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+RED='\033[38;5;196m'
+NC='\033[0m' # No Color
+
+SUCCESS_SYMBOL="${GREEN}✔${NC}"
+FAIL_SYMBOL="${RED}✖${NC}"
+
+# --- Helper function to check commands ---
+CheckCommand() {
+    local exit_code=$?
+    local success_msg="$1"
+
+    if [ $exit_code -ne 0 ]; then
+        # Also add colors to the error
+        echo -e "${FAIL_SYMBOL} ${RED}ERROR:${NC} The previous OpenSSL command exited with code $exit_code. Execution halted." >&2
+        exit $exit_code
+    fi
+
+    if [ -n "$success_msg" ]; then
+        echo -e " ${SUCCESS_SYMBOL} $success_msg"
+    fi
+}
+
+Confirm() {
+    printf '\e[1;37m%s\e[0m (y/n) ' "$1"
+    read -n 1 -rs
+    if [[ $REPLY =~ ^[Yy]$ ]]; 
+        then printf '\e[32m%s\e[0m\n' 'yes'; return 0
+        else printf '\e[31m%s\e[0m\n' 'no'; return 1
+    fi
+}
+
+# --- Password management functions ---
+GeneratePassword() {
+    local len="$1"
+    head /dev/urandom | tr -dc A-Za-z0-9 | head -c $len
+}
+
+SavePassword() {
+    local password="$1"
+    local file="$2"
+
+    echo "$password" > "$file"
+    chmod 600 "$file"
+}
+
+# Reads password from file for automatic passing to OpenSSL.
+ReadPassword() {
+    local file="$1"
+    cat "$file"
+}
+
+Cleanup() {
+    echo '== Cleanup =='
+
+    # Remove old CA files for cleanliness before initialization
+    if [ -d "$CA_DIR" ]; then
+        rm -r "$CA_DIR"
+        CheckCommand "Removed DIR ($CA_DIR)..."
+    fi
+
+    if [ -d "$SERVER_DIR" ]; then
+        rm -r "$SERVER_DIR"
+        CheckCommand "Removed DIR ($SERVER_DIR)..."
+    fi
+
+    if [ -d "$CLIENT_DIR" ]; then
+        rm -r "$CLIENT_DIR"
+        CheckCommand "Removed DIR ($CLIENT_DIR)..."
+    fi
+
+    echo
+}
+
+DropAndCreateDir() {
+    local dir="$1"
+
+    if [[ -d "$dir" ]]; then
+        rm -r "$dir"
+        CheckCommand "Removed DIR ($dir)..."
+    fi
+
+    mkdir -p "$dir"
+    CheckCommand "Created DIR ($dir)..."
+}
+
+# --- Function: Create signing configuration ---
+CreateConfigCA() {
+    local ca_dir="$1"
+
+    cat > "$ca_dir/ca_signing.cnf" <<EOF
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+# CA directories and files
+dir             = $ca_dir
+certs           = \$dir
+new_certs_dir   = \$dir/$ISSUED_DIR  # <<< Directory for issued certificates
+database        = \$dir/index.txt    # <<< Key database file
+certificate     = \$dir/ca.crt
+private_key     = \$dir/ca.key
+serial          = \$dir/ca.srl       # <<< Key file for serial numbers
+RANDFILE        = \$dir/.rand
+
+# CRL Management
+crldir          = \$dir/$CRL_DIR          # <<< Path to CRL directory
+crl             = \$dir/$CRL_DIR/crl.pem  # <<< Path to CRL file
+crlnumber       = \$dir/$CRL_DIR/crl.srl  # <<< CRL serial number file
+default_crl_days = 30                     # CRL validity days
+
+# Policies and constraints
+policy          = policy_anything
+email_in_dn     = no
+name_opt        = ca_default
+cert_opt        = ca_default
+copy_extensions = copyall
+default_days    = 365
+default_md      = sha256
+
+[ crl_ext ]
+# These extensions are standard for CRL
+authorityKeyIdentifier=keyid:always
+
+[ policy_anything ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+userId                  = optional
+
+[ server_ext ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ client_ext ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature
+extendedKeyUsage = clientAuth
+EOF
+}
+
+# --- Function: Generate base configuration (for DN) ---
+GetBaseConfig() {
+    local common_name="$1"
+
+    cat <<EOF
+[ req ]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[ req_distinguished_name ]
+countryName = UA
+stateOrProvinceName = Kyiv
+localityName = Kyiv
+organizationName = HomeWorks
+organizationalUnitName = IT
+commonName = $common_name
+# {{userId}}
+EOF
+}
+
+# --- Function: Generate initial CRL ---
+GenerateInitialCRL() {
+    local ca_password=$(ReadPassword "$CA_DIR/ca.pass")
+
+    echo "== Initializing Certificate Revocation List (CRL) =="
+
+    local output=$(
+      openssl ca -gencrl -config "$CA_DIR/ca_signing.cnf" -passin pass:"$ca_password" \
+        -out "$CA_DIR/crl/crl.pem" 2>&1
+    )
+
+    CheckCommand "Created file $CA_DIR/crl/crl.pem"
+    echo -e "$output" | sed 's/^/   /'
+    echo
+}
+
+
+# --- 1. Generate CA (Certificate Authority) ---
+
+GenerateCA() {
+    local commonName="$1"
+
+    echo "== Generating root CA =="
+
+    DropAndCreateDir "$CA_DIR"
+    cd "$CA_DIR"
+
+    # Create directory for issued certificates
+    mkdir -p "$ISSUED_DIR"
+
+    # Create directory for CRL (revoked certificates)
+    mkdir -p "$CRL_DIR"
+
+    # 1.1 Create index and serial files (Critical for OpenSSL CA)
+    touch index.txt
+
+    # Serial number in modern style (used with -CAcreateserial for client/server certs)
+    echo "01" > ca.srl
+    ln -s ca.srl serial
+
+    # CRL serial number
+    echo "01" > "$CRL_DIR/crl.srl"
+
+    # 1.2 Create signing configuration file
+    CreateConfigCA "$CA_DIR"
+    CheckCommand "1. Generated CA configuration – ca_signing.cnf"
+
+    # 1.3 Generate password for CA key
+    local ca_password=$(GeneratePassword 64)
+    SavePassword "$ca_password" "ca.pass"
+    CheckCommand "2. Generated key password – ca.pass"
+
+    # 1.4 Generate CA private key
+    openssl genrsa -aes256 -passout pass:"$ca_password" -out ca.key 4096
+    CheckCommand "3. Generated private key – ca.key"
+
+    # 1.4 Create .cnf for CA
+    cat > ca.cnf <<EOF
+$(GetBaseConfig "$commonName" | sed 's/v3_req/v3_ca/')
+
+[ v3_ca ]
+# This section is required for proper self-signed CA generation (ca.crt)
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always,issuer
+basicConstraints=critical,CA:TRUE
+keyUsage=critical,digitalSignature,keyCertSign,cRLSign
+EOF
+    CheckCommand "4. Generated configuration – ca.cnf"
+
+    # 1.5 Create self-signed root certificate
+    openssl req -x509 -new -sha256 -days 3650 \
+      -key ca.key -passin pass:"$ca_password" \
+      -out ca.crt -config ca.cnf -extensions v3_ca
+
+    # Issued and signed certificate –
+    CheckCommand "5. Generated certificate – ca.crt"
+    echo
+
+    cd "$APP_DIR"
+}
+
+# --- 3. Generate Server SAN certificate ---
+
+GenerateServer() {
+    # Get only domain, create directory based on it
+    local server_domain="$1"
+
+    # SAN list, e.g. "DNS:app.loc,IP:127.0.0.1"
+    local server_san="DNS:$server_domain,DNS:*.$server_domain,IP:127.0.0.1"
+    local target_dir="$SERVER_DIR/$server_domain"
+
+    local ca_password=$(ReadPassword "$CA_DIR/ca.pass")
+
+    echo "== Generating Server SAN certificate =="
+
+    DropAndCreateDir "$target_dir"
+    cd "$target_dir"
+
+    # 3.1 Generate private key
+    openssl genrsa -out $server_domain.key 2048
+    CheckCommand "1. Generated private key – $server_domain.key"
+
+    # 3.2 Create .ext file for SAN
+    cat > $server_domain.ext <<EOF
+$(GetBaseConfig "$server_domain")
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = $server_san
+EOF
+    CheckCommand "2. Generated configuration – $server_domain.ext"
+
+    # 3.3 Create CSR
+    openssl req -new -key $server_domain.key -out $server_domain.csr -config $server_domain.ext
+    CheckCommand "3. Generated CSR – $server_domain.csr"
+
+    # 3.4 Sign CSR with CA
+    local sign_output=$(
+      openssl ca -batch -config $CA_DIR/ca_signing.cnf -extensions server_ext \
+        -passin pass:"$ca_password" -in $server_domain.csr -out $server_domain.crt 2>&1
+    )
+
+    CheckCommand "4. Issued and signed certificate – $server_domain.crt"
+    echo -e "\n$sign_output\n" | sed 's/^/      /'
+
+    local is_valid=$(ValidateCert "$server_domain.crt")
+    CheckCommand "5. Validation check – $is_valid"
+    echo
+
+    cd "$APP_DIR"
+}
+
+# --- 4. Generate Client certificate (M-TLS) ---
+
+GenerateClient() {
+    local client_name="$1-client"
+    local target_dir="$CLIENT_DIR/$client_name"
+
+    local ca_password=$(ReadPassword "$CA_DIR/ca.pass")
+
+    echo "== Generating Client certificate =="
+
+    DropAndCreateDir "$target_dir"
+    cd "$target_dir"
+
+    # 4.1 Generate password for PKCS#12
+    local client_password=$(GeneratePassword 32)
+    SavePassword "$client_password" "$client_name.pass"
+    CheckCommand "1. Generated key password – $client_name.pass."
+
+    # 4.2 Generate client private key
+    openssl genrsa -out $client_name.key 2048
+    CheckCommand "2. Generated private key – $client_name.key."
+
+    # 4.3 Create .ext file for clientAuth
+    cat > $client_name.ext <<EOF
+$(GetBaseConfig "$client_name" | sed 's/# {{userId}}/userId = 0197ad51-17b1-7efa-8531-8ef66c79e49d/')
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature
+extendedKeyUsage = clientAuth
+EOF
+    CheckCommand "3. Generated configuration – $client_name.ext"
+
+    # 4.4 Create CSR
+    openssl req -new -key $client_name.key -out $client_name.csr -config $client_name.ext
+    CheckCommand "4. Generated CSR – $client_name.csr."
+
+    # 4.5 Sign CSR with CA
+    local sign_output=$(
+      openssl ca -batch -config $CA_DIR/ca_signing.cnf -extensions client_ext \
+        -passin pass:"$ca_password" -in $client_name.csr -out $client_name.crt 2>&1
+    )
+
+    CheckCommand "5. Issued and signed certificate – $client_name.crt"
+    echo -e "\n$sign_output\n" | sed 's/^/      /'
+
+    local is_valid=$(ValidateCert "$client_name.crt")
+    CheckCommand "6. Validation check – $is_valid"
+
+    # 4.6 Create PKCS#12 file for browser import
+    openssl pkcs12 -export -out $client_name.p12 -inkey $client_name.key -in $client_name.crt -certfile $CA_DIR/ca.crt \
+      -passout pass:"$client_password"
+
+    CheckCommand "7. Converted certificate to PKCS#12 – $client_name.p12"
+    echo
+
+    cd "$APP_DIR"
+}
+
+ValidateCert() {
+    local cert_file="$1"
+    openssl verify -verbose -issuer_checks -policy_print -crl_check -CRLfile "$CA_DIR/crl/crl.pem" -CAfile "$CA_DIR/ca.crt" "$cert_file" 2>&1
+}
+
+GetCertInfoByCommonName() {
+    local common_name="$1"
+    local index_file="$CA_DIR/index.txt"
+
+    if [ ! -f "$index_file" ]; then
+        return 1 # Index doesn't exist
+    fi
+
+    # Find the last entry matching CommonName (CN)
+    local result=$(grep -F "$common_name" "$index_file" | tail -n 1)
+
+    if [ -z "$result" ]; then
+        return 1 # Not found
+    fi
+
+    # Output serial ($4) and status ($1)
+    # Default delimiter in index.txt is tab ('\t').
+    # echo "$result" | cut -f 4
+    echo "$result" | awk -F'\t' '{print $4, $1}'
+
+    return 0 # Found
+}
+
+GetIndexedCertInfoBySN() {
+    local serial_number="$1"
+    local index_file="$CA_DIR/index.txt"
+
+    if [ ! -f "$index_file" ]; then
+        return 1
+    fi
+
+    # Fix: find all matches (ensuring string comparison) and output ONLY THE LAST (newest) via | tail -n 1
+    local result=$(awk -F'\t' -v sn_to_find="$serial_number" '
+        $4"" == sn_to_find"" {
+            print; # Print all matches
+        }
+    ' "$index_file" | tail -n 1)
+
+    if [ -z "$result" ]; then
+        return 1 # Not found
+    fi
+
+    # Use tr to replace TAB with '^' for easier parsing later
+    echo "$result" | tr '\t' '^'
+
+    return 0
+}
+
+GetIndexedCertInfoByCN() {
+    local common_name="$1"
+    local index_file="$CA_DIR/index.txt"
+
+    if [ ! -f "$index_file" ]; then
+        return 1
+    fi
+
+    local result=$(awk -F'\t' -v cn_to_find="CN=$common_name" '
+        BEGIN { gsub(/[.+*?^$(){}[|]/, "\\\\&", cn_to_find) } # Escape special chars
+        $6 ~ ("/" cn_to_find "$") || $6 ~ ("/" cn_to_find "/") {print}
+    ' "$index_file" | tail -n 1)
+
+    if [ -z "$result" ]; then
+        return 1 # Not found
+    fi
+
+    # Use tr for clean replacement of TAB with '^'
+    echo "$result" | tr '\t' '^'
+
+    return 0
+}
+
+ParseAndFormatSubject() {
+    local subject_string="$1"
+
+    # Use AWK to find fields by prefix (best approach)
+    local formatted_string=$(echo "$subject_string" | awk -F'/' '{
+        cn_country=""; st_state=""; org=""; ou=""; cn="";
+
+        # Iterate all fields starting from $2 (since $1 is always empty)
+        for (i=2; i<=NF; i++) {
+            if ($i ~ /^C=/) { cn_country=$i; sub(/^C=/, "", cn_country); }
+            else if ($i ~ /^ST=/) { st_state=$i; sub(/^ST=/, "", st_state); }
+            else if ($i ~ /^O=/) { org=$i; sub(/^O=/, "", org); }
+            else if ($i ~ /^OU=/) { ou=$i; sub(/^OU=/, "", ou); }
+            else if ($i ~ /^CN=/) { cn=$i; sub(/^CN=/, "", cn); }
+            # L=, UID= ignored
+        }
+
+        # Format result
+        printf "%s.%s %s(%s)  %s\n", cn_country, st_state, org, ou, cn
+    }')
+
+    echo "$formatted_string"
+}
+
+ParseAndFormatSubjectRaw() {
+    local subject_string="$1"
+
+    # Use AWK to find fields by prefix and format
+    local formatted_string=$(echo "$subject_string" | awk -F'/' '{
+        # Initialize variables
+        cn_country=""; st_state=""; locality=""; org=""; ou=""; cn=""; 
+
+        # Iterate all fields starting from $2 (since $1 is always empty)
+        for (i=2; i<=NF; i++) {
+            # Use sub() to remove prefix
+            if ($i ~ /^C=/) { 
+                cn_country=$i; sub(/^C=/, "", cn_country); 
+            } else if ($i ~ /^ST=/) { 
+                st_state=$i; sub(/^ST=/, "", st_state); 
+            } else if ($i ~ /^L=/) { 
+                locality=$i; sub(/^L=/, "", locality); 
+            } else if ($i ~ /^O=/) { 
+                org=$i; sub(/^O=/, "", org); 
+            } else if ($i ~ /^OU=/) { 
+                ou=$i; sub(/^OU=/, "", ou); 
+            } else if ($i ~ /^CN=/) { 
+                cn=$i; sub(/^CN=/, "", cn); 
+            }
+            # UID and other fields ignored
+        }
+
+        # Format result as semicolon-separated string (;)
+        # Order: C;ST;L;O;OU;CN
+        printf "%s;%s;%s;%s;%s;%s\n", cn_country, st_state, locality, org, ou, cn
+    }')
+
+    echo "$formatted_string"
+}
+
+CertRevoke() {
+    local serial_hex="$1"
+    local ca_password=$(ReadPassword "$CA_DIR/ca.pass")
+
+    echo "== Revoking certificate =="
+
+    if [ ! -f "$CA_DIR/issued/$serial_hex.pem" ]; then
+        echo "❌ Error: Certificate with serial $serial_hex not found in $CA_DIR/issued/" >&2
+        exit 1
+    fi
+
+    # Revoke the certificate (update index.txt)
+    local revokeOut=$(
+      openssl ca -config "$CA_DIR/ca_signing.cnf" \
+        -revoke "$CA_DIR/issued/$serial_hex.pem" \
+        -passin pass:"$ca_password" -batch 2>&1
+    )
+
+    CheckCommand "Revoked certificate $serial_hex in the database (index.txt)"
+    echo -e "\n$revokeOut\n" | sed 's/^/   /'
+
+    # Update Certificate Revocation List (CRL)
+    local updateOut=$(
+      openssl ca -gencrl -config "$CA_DIR/ca_signing.cnf" \
+        -passin pass:"$ca_password" -out "$CA_DIR/crl/crl.pem" -batch 2>&1
+    )
+
+    CheckCommand "Updated CRL (crl.pem)"
+    echo -e "$updateOut\n" | sed 's/^/   /'
+    # echo
+
+    return 0
+}
+
+# Load index into an associative array
+LoadCertIndex() {
+    local index_file="$CA_DIR/index.txt"
+    local -n index_map=$1 
+    local SAFE_DELIMITER=";"   # Safe delimiter for data
+    local INTERNAL_DELIMITER="|" # Internal delimiter for 'read'
+
+    if [ ! -f "$index_file" ]; then
+        echo "Error: Index file $index_file not found." >&2
+        return 1
+    fi
+
+    # Use AWK to filter, extract CN and replace delimiter
+    local raw_data=$(awk -F'\t' -v d_int="$INTERNAL_DELIMITER" -v d_safe="$SAFE_DELIMITER" '
+        # Filter: not revoked (!/^R/) and has CN
+        !/^R/ && /CN=/ {
+            # Extract CN: $6=DN. Use sub() to isolate CN
+            cn_part = $6; 
+            sub(/.*CN=/, "", cn_part);  # Remove everything up to 'CN='
+            sub(/\/.*/, "", cn_part);   # Remove '/' and everything after (if any UID)
+
+            # Replace TAB in whole $0 with safe delimiter
+            gsub(/\t/, d_safe, $0);
+
+            # Output: CN_RAW | FULL_LINE_WITH_SAFE_DELIMITER
+            print cn_part d_int $0;
+        }
+    ' "$index_file")
+
+    # Read lines using | as delimiter to avoid subshell issues
+    while IFS="$INTERNAL_DELIMITER" read -r raw_cn full_data; do
+
+        # Key normalization: am-user -> am (naming scheme)
+        # local cn_key
+        # if [[ "$raw_cn" == *-user ]]; then
+        #     cn_key="${raw_cn%-user}"
+        # else
+        #     cn_key="$raw_cn"
+        # fi
+
+        # Store in map (full_data contains 6 fields separated by ;)
+        # if [[ -n "$cn_key" ]]; then
+        #      index_map["$cn_key"]="$full_data"
+        # fi
+        if [[ -n "$raw_cn" ]]; then
+             index_map["$raw_cn"]="$full_data"
+        fi
+
+    done <<< "$raw_data" 
+
+    return 0
+}
+
+ListCerts() {
+    echo '== Certificate list =='
+
+    local dirname="$1"
+    local -a search_paths=()
+
+    # Create associative array for caching
+    declare -A CERT_INDEX
+
+    # 1. Load data from index.txt ONCE
+    LoadCertIndex CERT_INDEX || return 1 
+
+    if [[ -z "$dirname" ]]; then
+        # "all" mode: add paths as separate array elements
+        search_paths+=("$SERVER_DIR")
+        search_paths+=("$CLIENT_DIR")
+    else
+        # "single" mode: add single path
+        search_paths+=("$APP_DIR/$dirname")
+    fi
+
+    find "${search_paths[@]}" -type f -name "*.crt" 2>/dev/null | while IFS= read -r cert_path; do
+        # 1. Extract directory name (server/client)
+        local relative_path="${cert_path#$APP_DIR/}"
+
+        # 2: Remove suffix (everything starting from first /)
+        local role="${relative_path%%/*}"
+
+        local common_name="$(basename "$cert_path" .crt)" # Clean approach
+
+        # 2. Quick lookup in cache (no I/O)
+        local cert_entry="${CERT_INDEX["$common_name"]}"
+
+        # Inside ListCerts, inside the find ... | while ...
+        if [[ -n "$cert_entry" ]]; then
+            # 3. Parsing: set IFS to ';'
+            IFS=";" read -r status expiration revocation sn reason dn _dummy_var <<< "$cert_entry"
+
+            # Subject from ParseAndFormatSubject
+            subject=$(ParseAndFormatSubject "$dn") 
+
+            # Output result
+            echo " – [$role]  $status  $sn   $expiration   $subject"
+        else
+            echo " – [$role]  $common_name (Not found in index.txt)"
+        fi
+    done
+
+    echo
+}
+
+CheckCerts() {
+    echo '== Checking certificates =='
+
+    local common_name="$1"
+    local search_dirs="$SERVER_DIR $CLIENT_DIR"
+    local name_template="*.crt"
+
+    if [[ ! -z "$common_name" ]]; then
+        name_template="$common_name.crt"
+    fi
+
+    find $search_dirs -type f -name "$name_template" | while IFS= read -r cert_path; do
+        local valid_out=$(ValidateCert "$cert_path")
+        local fname=$(basename $cert_path)
+
+        IFS=':' read -r FILE_PATH STATUS <<< "$valid_out"
+
+        # Trim spaces at start and end of STATUS
+        STATUS=$(echo "$STATUS" | xargs)
+
+        # Combine and format
+        FILE_PATH="${FILE_PATH//$fname/$CYAN${fname}$NC}"
+
+        CheckCommand "${STATUS}: ${FILE_PATH}"
+    done
+
+    echo
+}
+
+UpdateTrustedCA() {
+    local ca_filename="$1"
+
+    if [ ! -d "$CA_TRUST_DIR" ]; then
+        echo "❌ Error: Trusted CA path '$CA_TRUST_DIR' does not exist." >&2
+        return 1
+    fi
+
+    if [ ! -f "$CA_TRUST_DIR/$ca_filename" ]; then
+
+        sudo cp "$CA_DIR/ca.crt" "$CA_TRUST_DIR/$ca_filename"
+        sudo chmod 444 "$CA_TRUST_DIR/$ca_filename"
+        sudo update-ca-trust
+        CheckCommand "Added CA to trusted – $CA_TRUST_DIR/$ca_filename."
+
+    else
+
+        local sum1=$(sha1sum -t "$CA_DIR/ca.crt" | awk '{print $1}')
+        local sum2=$(sudo sha1sum -t "$CA_TRUST_DIR/$ca_filename" | awk '{print $1}')
+
+        if [[ "$sum1" != "$sum2" ]]; then
+            sudo rm "$CA_TRUST_DIR/$ca_filename"
+
+            sudo cp "$CA_DIR/ca.crt" "$CA_TRUST_DIR/$ca_filename"
+            # sudo chmod 400 "$CA_TRUST_DIR/$ca_filename"
+            sudo chmod 444 "$CA_TRUST_DIR/$ca_filename"
+            sudo update-ca-trust
+
+            CheckCommand "Updated trusted CA – $CA_TRUST_DIR/$ca_filename."
+        fi
+
+    fi
+}
+
+DeployCert() {
+    local domain="$1"
+    # local deploy_path="$2"
+    local ssl_path="$HTDOCS_DIR/$domain/.ssl"
+
+    # echo "== Deploying certificates for $domain to $HTDOCS_DIR =="
+
+    if [ ! -d "$ssl_path" ]; then
+        # echo "❌ Error: Deployment path '$HTDOCS_DIR' does not exist." >&2
+        # return 1
+    
+        sudo mkdir -p "$ssl_path"
+    fi
+
+    # 1. Copying
+    sudo cp "$SERVER_DIR/$domain/${domain}.crt" "$ssl_path/"
+    sudo cp "$SERVER_DIR/$domain/${domain}.key" "$ssl_path/"
+    # sudo cp "$CA_DIR/ca.crt" "$CA_TRUST_DIR/"
+
+    # 2. Set permissions
+    sudo chmod 644 "$ssl_path/${domain}.crt"
+    # sudo chmod 644 "$ssl_path/ca.crt"
+
+    # Key: 640 for nginx (or 400 for root-only)
+    sudo chmod 640 "$ssl_path/${domain}.key"
+
+    CheckCommand "Updated – certificate ${domain}."
+
+    return 0
+}
+
+DeployServerCerts() {
+    # Use globbing for reliable iteration over directories
+    for dir_path in "$SERVER_DIR"/*.loc; do
+        # Extract only the directory name
+        local domain="$(basename "$dir_path")"
+        
+        # Check (though glob ensures this)
+        if [[ -d "$dir_path" ]]; then 
+            DeployCert "$domain"
+        fi
+    done
+}
+
+TestConnection() {
+    echo -e "== Testing connection ==="
+
+    local client_name="$1"
+    local domain="$2"
+    local client_dir="$CLIENT_DIR/$client_name"
+
+    echo -e "   client($client_name) domain($domain)\n"
+
+    curl -v --no-progress-meter --cacert $CA_DIR/ca.crt \
+      --cert $client_dir/$client_name.crt --key $client_dir/$client_name.key https://$domain
+}
+
+# --- Default scenario function (for quick demo) ---
+DemoScenario() {
+    GenerateCA "$CA_COMMON_NAME"
+    GenerateInitialCRL
+
+    # Generate certificate for client (browser)
+    GenerateClient "am"
+
+    # Generate certificate for server with domain "osbb.loc"
+    GenerateServer "osbb.loc"
+    ListCerts
+    CheckCerts
+
+    # DeployServerCerts
+    # UpdateTrustedCA "homeworks-ca.crt"
+}
+
+# --- Help / Usage ---
+Usage() {
+    echo "Usage: $0 <command> [arguments]"
+    echo ""
+    echo "Commands:"
+    echo "  init                          – Initialize CA and create initial CRL."
+    echo "  server <domain>               – Generate server certificate (e.g. osbb.loc)."
+    echo "  client <name>                 – Generate client certificate (e.g. client1)."
+    echo "  revoke <SN>                   – Revoke a certificate (irreversible)."
+    echo "  list <role>?                  – Show list of certificates (role: server|client)."
+    echo "  find <CN>?                    – Find certificate (e.g. osbb.loc)."
+    echo "  check <CN>?                   – Run validation scenario for all or one certificate (e.g. osbb.loc)."
+    echo "  deploy <domain>?              – Deploy generated certificates into the project and update trusted CA."
+    echo "  test <client_name> <domain>   – Test connection using generated certificates."
+    echo "  demo                          – Run full test scenario and cleanup."
+    echo ""
+    echo "  <arg>? – optional      (command runs with optional argument)"
+    echo "  *CN    – Common Name   (certificate field)"
+    echo "  *SN    – Serial Number (certificate serial number)"
+    echo ""
+    exit 1
+}
+
+main() {
+    if [ "$#" -lt 1 ]; then
+        Usage
+    fi
+
+    local cmd="$1"
+    local arg="$2"
+    local arg2="$3"
+
+    case "$cmd" in
+        demo|default)
+            DemoScenario
+            ;;
+
+        init)
+            Cleanup
+            GenerateCA "$CA_COMMON_NAME"
+            GenerateInitialCRL
+            ;;
+
+        server)
+            if [ -z "$arg" ]; then
+                echo "❌ Error: Please specify the server domain." >&2; Usage
+            fi
+
+            # 1. Get serial number and status
+            local cert_info=$(GetCertInfoByCommonName "$arg")
+            # echo "$cert_info"
+
+            if [[ -n "$cert_info" ]]; then
+                # Certificate found
+                read -r serial_hex status <<< "$cert_info"
+
+                echo "⚠️  Certificate for domain '$arg' already exists. (SN: $serial_hex; Status: $status)."
+
+                case "$status" in
+                    "V")
+                        # ACTIVE: Revoke and reissue
+                        if Confirm "Certificate is active. Revoke ($serial_hex) and reissue?"; then
+                            echo
+
+                            if CertRevoke "$serial_hex"; then
+                                # Archive
+                                if [[ -d "$SERVER_DIR/$arg" ]]; then
+                                    cd "$SERVER_DIR/$arg"
+                                    zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                    cd "$APP_DIR"
+                                fi
+
+                                GenerateServer "$arg"
+                            fi
+                        fi
+                        ;;
+
+                    "R")
+                        # REVOKED: Archive and reissue (without revoking again)
+                        if Confirm "Certificate is already revoked. Reissue?"; then
+                            # Archive
+                            if [[ -d "$SERVER_DIR/$arg" ]]; then
+                                cd "$SERVER_DIR/$arg"
+                                zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                cd "$APP_DIR"
+                            fi
+
+                            GenerateServer "$arg"
+                        fi
+                        ;;
+
+                    *)
+                        # OTHER STATUS (E, X): Requires manual intervention or reissue
+                        if Confirm "Certificate has unknown status ($status). Reissue?"; then
+                            # Archive
+                            if [[ -d "$SERVER_DIR/$arg" ]]; then
+                                cd "$SERVER_DIR/$arg"
+                                zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                cd "$APP_DIR"
+                            fi
+
+                            GenerateServer "$arg"
+                        fi
+                        ;;
+                esac
+
+            else
+                # Certificate not found, generate for the first time
+                GenerateServer "$arg"
+            fi
+
+            ;;
+
+        client)
+            if [ -z "$arg" ]; then
+                echo "❌ Error: Please specify the client name." >&2; Usage
+            fi
+
+            # 1. Get serial number and status
+            local cert_info=$(GetCertInfoByCommonName "$arg-client")
+
+            if [[ -n "$cert_info" ]]; then
+                # Certificate found
+                read -r serial_hex status <<< "$cert_info"
+
+                echo "⚠️  Certificate for '$arg' already exists. (SN: $serial_hex; Status: $status)."
+
+                case "$status" in
+                    "V")
+                        # ACTIVE: Revoke and reissue
+                        if Confirm "Certificate is active. Revoke ($serial_hex) and reissue?"; then
+                            echo
+
+                            if CertRevoke "$serial_hex"; then
+                                # Archive
+                                if [[ -d "$CLIENT_DIR/$arg" ]]; then
+                                    cd "$CLIENT_DIR/$arg"
+                                    zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                    cd "$APP_DIR"
+                                fi
+
+                                GenerateClient "$arg"
+                            fi
+                        fi
+                        ;;
+
+                    "R")
+                        # REVOKED: Archive and reissue (without revoking again)
+                        if Confirm "Certificate is already revoked. Reissue?"; then
+                            # Archive and Generate
+                            if [[ -d "$CLIENT_DIR/$arg" ]]; then
+                                cd "$CLIENT_DIR/$arg"
+                                zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                cd "$APP_DIR"
+                            fi
+
+                            GenerateClient "$arg"
+                        fi
+                        ;;
+
+                    *)
+                        # OTHER STATUS (E, X): Requires manual intervention or reissue
+                        if Confirm "Certificate has unknown status ($status). Reissue?"; then
+                            # Archive
+                            if [[ -d "$CLIENT_DIR/$arg" ]]; then
+                                cd "$CLIENT_DIR/$arg"
+                                zip -rDX9q ../$arg-$serial_hex.zip * -x *.zip
+                                cd "$APP_DIR"
+                            fi
+
+                            GenerateClient "$arg"
+                        fi
+                        ;;
+                esac
+
+            else
+                # Certificate not found, generate for the first time
+                GenerateClient "$arg"
+            fi
+
+            ;;
+
+            find)
+                if [ -z "$arg" ]; then
+                echo "❌ Error: Please specify the server domain." >&2; Usage
+                fi
+
+                local common_name="$arg"
+                local cert_info=""
+
+                if ! cert_info=$(GetIndexedCertInfoByCN "$common_name"); then
+                echo "Error: Certificate with CommonName '$common_name' not found." >&2
+                return 1
+                fi
+
+                if [[ -n "$cert_info" ]]; then
+                IFS="^" read -r status expiration revocation sn reason dn <<< "$cert_info"
+                IFS=";" read -r country state locality org org_unit common_name <<< "$(ParseAndFormatSubjectRaw "$dn")"
+
+                local subject="$country.$state $org($org_unit)  $common_name"
+                echo -e " >>  $status   $sn   $expiration   $subject\n"
+                fi
+                ;;
+
+        revoke)
+            if [ -z "$arg" ]; then
+                echo "❌ Error: Please specify the serial number." >&2; Usage
+            fi
+
+            local serial_number="$arg"
+            local cert_info=""
+
+            # local cert_info=$(GetIndexedCertInfoByCN "$arg")
+            # local cert_info=$(GetIndexedCertInfoBySN "$arg")
+
+            if ! cert_info=$(GetIndexedCertInfoBySN "$serial_number"); then
+                echo -e "Error: Certificate with serial '$serial_number' not found.\n" >&2
+                return 1
+            fi
+
+            if [[ -n "$cert_info" ]]; then
+                # 1. Parsing: set IFS to '^'
+                IFS="^" read -r status expiration revocation sn reason dn <<< "$cert_info"
+                IFS=";" read -r country state locality org org_unit common_name <<< "$(ParseAndFormatSubjectRaw "$dn")"
+
+                local subject="$country.$state $org($org_unit)  $common_name"
+
+                case "$status" in
+                    "V")
+                        # ACTIVE: Revoke
+
+                        echo -e " >>  $status   $sn   $expiration   $subject\n"
+
+                        if Confirm " Certificate is active. Revoke?"; then
+                            local role_dir=""
+                            local cert_dir=""
+
+                            if [[ "$common_name" == *-client ]]; then
+                                role_dir="$CLIENT_DIR"
+                                # cert_dir="${common_name%-user}"
+                                cert_dir="$common_name"
+                            else
+                                role_dir="$SERVER_DIR"
+                                cert_dir="$common_name"
+                            fi
+
+                            # echo "Revoking $role_dir/$cert_dir"
+
+                            if CertRevoke "$sn"; then
+                                # Archive...
+
+                                cd "$role_dir/$cert_dir"
+                                # zip -rDX9q ../$cert_dir-$sn.zip * -x *.zip
+
+                                local zip_out=$(zip -rDX9v ../$cert_dir-$sn.zip * -x *.zip 2>&1)
+
+                                CheckCommand "Created archive – $cert_dir-$sn.zip"
+                                echo -e "\n$zip_out\n" | sed 's/^/   /'
+
+                                cd "$APP_DIR"
+
+                                local rm_out=$(rm -rv "$role_dir/$cert_dir" 2>&1)
+
+                                CheckCommand "Removed directory – $role_dir/$cert_dir"
+                                echo -e "\n$rm_out\n" | sed 's/^/   /'
+                            fi
+                        fi
+
+                        ;;
+
+                    "R")
+                        # REVOKED: Skip this step
+
+                        echo "Certificate already has revoked status (*R – revoke)"
+                        echo -e " >>  $status   $sn   $expiration   $subject\n"
+                        ;;
+
+                    *)
+                        # OTHER STATUS (E, X): Requires manual intervention or reissue
+                        if Confirm "Certificate has unknown status ($status). Revoke?"; then
+                            local role_dir=""
+                            local cert_dir=""
+
+                            if [[ "$common_name" == *-client ]]; then
+                                role_dir="$CLIENT_DIR"
+                                # cert_dir="${common_name%-user}"
+                                cert_dir="$common_name"
+                            else
+                                role_dir="$SERVER_DIR"
+                                cert_dir="$common_name"
+                            fi
+
+                            # echo "Revoking $role_dir/$cert_dir"
+
+                            if CertRevoke "$sn"; then
+                                # Archive...
+
+                                cd "$role_dir/$cert_dir"
+                                # zip -rDX9q ../$cert_dir-$sn.zip * -x *.zip
+
+                                local zip_out=$(zip -rDX9v ../$cert_dir-$sn.zip * -x *.zip 2>&1)
+
+                                CheckCommand "Created archive – $cert_dir-$sn.zip"
+                                echo -e "\n$zip_out\n" | sed 's/^/   /'
+
+                                cd "$APP_DIR"
+
+                                local rm_out=$(rm -rv "$role_dir/$cert_dir" 2>&1)
+
+                                CheckCommand "Removed directory – $role_dir/$cert_dir"
+                                echo -e "\n$rm_out\n" | sed 's/^/   /'
+                            fi
+                        fi
+                        ;;
+                esac
+            fi
+
+            ;;
+
+        list)
+            if [ -z "$arg" ]; then
+                ListCerts;
+            else
+                ListCerts "$arg";
+            fi
+            ;;
+
+        check)
+            if [ -z "$arg" ]; then CheckCerts; else CheckCerts "$arg"; fi
+            ;;
+
+        deploy)
+            echo "== Deploying certificates =="
+            local domain="$arg"
+
+            if [ -z "$domain" ]; then
+                DeployServerCerts;
+            else
+                DeployCert "$domain";
+            fi
+
+            UpdateTrustedCA "homeworks-ca.crt"
+
+            # To add CA to trusted (for browsers):
+            # certutil -d sql:"$HOME/.pki/nssdb" -A -t "C,," -n "$CA_COMMON_NAME" -i "$CA_DIR/ca.crt"
+
+            printf '\n%s\n\n' "(!) Don't forget to restart Nginx."
+            ;;
+
+        test)
+            if [ -z "$arg" ]; then
+                echo "❌ Error: Please specify the client name." >&2; Usage
+            fi
+
+            TestConnection "$arg" "$arg2"
+            ;;
+
+        *)
+            Usage
+            ;;
+    esac
+}
+
+main "$@"
