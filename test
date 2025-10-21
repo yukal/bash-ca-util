@@ -3,36 +3,36 @@
 # If any command returns a non-zero exit code, the script will exit immediately.
 set -euo pipefail
 
-./cautil init
-./cautil client am
-./cautil server osbb.loc
-./cautil check
-./cautil list
+./utilca init
+./utilca client am
+./utilca server osbb.loc
+./utilca check
+./utilca list
 
-./cautil client am       # chose "n" (no)
-./cautil client am       # chose "y" (yes)
-./cautil server osbb.loc # chose "n" (no)
-./cautil server osbb.loc # chose "y" (yes)
+./utilca client am       # chose "n" (no)
+./utilca client am       # chose "y" (yes)
+./utilca server osbb.loc # chose "n" (no)
+./utilca server osbb.loc # chose "y" (yes)
 
-./cautil check
-./cautil list client
-./cautil list server
-./cautil list
+./utilca check
+./utilca list client
+./utilca list server
+./utilca list
 
-./cautil revoke 03       # chose "n" (no)
-./cautil revoke 03       # chose "y" (yes)
-./cautil revoke 03       # --
-./cautil revoke 04       # chose "n" (no)
-./cautil revoke 04       # chose "y" (yes)
-./cautil revoke 04       # --
+./utilca revoke 03       # chose "n" (no)
+./utilca revoke 03       # chose "y" (yes)
+./utilca revoke 03       # --
+./utilca revoke 04       # chose "n" (no)
+./utilca revoke 04       # chose "y" (yes)
+./utilca revoke 04       # --
 
-./cautil client am       # (chose "y" yes)
-./cautil server osbb.loc # (chose "y" yes)
+./utilca client am       # (chose "y" yes)
+./utilca server osbb.loc # (chose "y" yes)
 
-./cautil check
-./cautil find am-client
-./cautil find osbb.loc
-./cautil list
+./utilca check
+./utilca find am-client
+./utilca find osbb.loc
+./utilca list
 
 # Should be:
 #
