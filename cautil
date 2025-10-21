@@ -713,7 +713,7 @@ DeployCert() {
     if [ ! -d "$ssl_path" ]; then
         # echo "❌ Error: Deployment path '$HTDOCS_DIR' does not exist." >&2
         # return 1
-    
+
         sudo mkdir -p "$ssl_path"
     fi
 
@@ -739,7 +739,7 @@ DeployServerCerts() {
     for dir_path in "$SERVER_DIR"/*.loc; do
         # Extract only the directory name
         local domain="$(basename "$dir_path")"
-        
+
         # Check (though glob ensures this)
         if [[ -d "$dir_path" ]]; then 
             DeployCert "$domain"
@@ -988,7 +988,6 @@ main() {
 
             local serial_number="$arg"
             local cert_info=""
-
 
             if ! cert_info=$(GetIndexedCertInfoBySN "$serial_number"); then
                 echo -e "Error: Certificate with serial '$serial_number' not found.\n" >&2
