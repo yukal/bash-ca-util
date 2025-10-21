@@ -17,7 +17,7 @@ CLIENT_DIR="$APP_DIR/client"
 HTDOCS_DIR="/var/www" # /var/www/<your_domain>/.ssl
 
 # User group for WEB
-WEB_GROUP="nginx"
+WEB_GROUP="www-data"
 
 # Colors
 GREEN='\033[0;32m'
