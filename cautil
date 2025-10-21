@@ -8,9 +8,10 @@ APP_DIR="${PWD%/}"
 
 CA_COMMON_NAME="HomeWorks Root CA"
 CA_DIR="$APP_DIR/ca"
+CA_CRL_DIR="crl"
+CA_ISSUED_DIR="issued"
 CA_TRUST_DIR="/etc/pki/ca-trust/source/anchors" # (Fedora)
-CRL_DIR="crl"
-ISSUED_DIR="issued"
+
 SERVER_DIR="$APP_DIR/server"
 CLIENT_DIR="$APP_DIR/client"
 HTDOCS_DIR="/var/www" # /var/www/<your_domain>/.ssl
@@ -118,7 +119,7 @@ default_ca = CA_default
 # CA directories and files
 dir             = $ca_dir
 certs           = \$dir
-new_certs_dir   = \$dir/$ISSUED_DIR  # <<< Directory for issued certificates
+new_certs_dir   = \$dir/$CA_ISSUED_DIR  # <<< Directory for issued certificates
 database        = \$dir/index.txt    # <<< Key database file
 certificate     = \$dir/ca.crt
 private_key     = \$dir/ca.key
@@ -126,9 +127,9 @@ serial          = \$dir/ca.srl       # <<< Key file for serial numbers
 RANDFILE        = \$dir/.rand
 
 # CRL Management
-crldir          = \$dir/$CRL_DIR          # <<< Path to CRL directory
-crl             = \$dir/$CRL_DIR/crl.pem  # <<< Path to CRL file
-crlnumber       = \$dir/$CRL_DIR/crl.srl  # <<< CRL serial number file
+crldir          = \$dir/$CA_CRL_DIR          # <<< Path to CRL directory
+crl             = \$dir/$CA_CRL_DIR/crl.pem  # <<< Path to CRL file
+crlnumber       = \$dir/$CA_CRL_DIR/crl.srl  # <<< CRL serial number file
 default_crl_days = 30                     # CRL validity days
 
 # Policies and constraints
@@ -215,10 +216,10 @@ GenerateCA() {
     cd "$CA_DIR"
 
     # Create directory for issued certificates
-    mkdir -p "$ISSUED_DIR"
+    mkdir -p "$CA_ISSUED_DIR"
 
     # Create directory for CRL (revoked certificates)
-    mkdir -p "$CRL_DIR"
+    mkdir -p "$CA_CRL_DIR"
 
     # 1.1 Create index and serial files (Critical for OpenSSL CA)
     touch index.txt
@@ -228,7 +229,7 @@ GenerateCA() {
     ln -s ca.srl serial
 
     # CRL serial number
-    echo "01" > "$CRL_DIR/crl.srl"
+    echo "01" > "$CA_CRL_DIR/crl.srl"
 
     # 1.2 Create signing configuration file
     CreateConfigCA "$CA_DIR"
