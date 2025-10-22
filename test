@@ -5,37 +5,37 @@ set -euo pipefail
 
 ./utilca init
 ./utilca client am
-./utilca server osbb.loc
+./utilca server domain.loc
 ./utilca check
 ./utilca list
 
-./utilca client am       # chose "n" (no)
-./utilca client am       # chose "y" (yes)
-./utilca server osbb.loc # chose "n" (no)
-./utilca server osbb.loc # chose "y" (yes)
+./utilca client am         # chose "n" (no)
+./utilca client am         # chose "y" (yes)
+./utilca server domain.loc # chose "n" (no)
+./utilca server domain.loc # chose "y" (yes)
 
 ./utilca check
 ./utilca list client
 ./utilca list server
 ./utilca list
 
-./utilca revoke 03       # chose "n" (no)
-./utilca revoke 03       # chose "y" (yes)
-./utilca revoke 03       # --
-./utilca revoke 04       # chose "n" (no)
-./utilca revoke 04       # chose "y" (yes)
-./utilca revoke 04       # --
+./utilca revoke 03         # chose "n" (no)
+./utilca revoke 03         # chose "y" (yes)
+./utilca revoke 03         # --
+./utilca revoke 04         # chose "n" (no)
+./utilca revoke 04         # chose "y" (yes)
+./utilca revoke 04         # --
 
-./utilca client am       # (chose "y" yes)
-./utilca server osbb.loc # (chose "y" yes)
+./utilca client am         # (chose "y" yes)
+./utilca server domain.loc # (chose "y" yes)
 
 ./utilca check
 ./utilca find am-client
-./utilca find osbb.loc
+./utilca find domain.loc
 ./utilca list
 
 # Should be:
 #
 # == Certificate list ==
-#  – [server]  V  06   <TIMESTAMP>   UA.Kyiv HomeWorks(IT)  osbb.loc
+#  – [server]  V  06   <TIMESTAMP>   UA.Kyiv HomeWorks(IT)  domain.loc
 #  – [client]  V  05   <TIMESTAMP>   UA.Kyiv HomeWorks(IT)  am-client

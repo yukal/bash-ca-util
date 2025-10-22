@@ -768,8 +768,8 @@ DemoScenario() {
     # Generate certificate for client (browser)
     GenerateClient "am"
 
-    # Generate certificate for server with domain "osbb.loc"
-    GenerateServer "osbb.loc"
+    # Generate certificate for server with domain "domain.loc"
+    GenerateServer "domain.loc"
     ListCerts
     CheckCerts
 
@@ -783,12 +783,12 @@ Usage() {
     echo ""
     echo "Commands:"
     echo "  init                          – Initialize CA and create initial CRL."
-    echo "  server <domain>               – Generate server certificate (e.g. osbb.loc)."
+    echo "  server <domain>               – Generate server certificate (e.g. domain.loc)."
     echo "  client <name>                 – Generate client certificate (e.g. client1)."
     echo "  revoke <SN>                   – Revoke a certificate (irreversible)."
     echo "  list <role>?                  – Show list of certificates (role: server|client)."
-    echo "  find <CN>                     – Find certificate (e.g. osbb.loc)."
-    echo "  check <CN>?                   – Run validation scenario for all or one certificate (e.g. osbb.loc)."
+    echo "  find <CN>                     – Find certificate (e.g. domain.loc)."
+    echo "  check <CN>?                   – Run validation scenario for all or one certificate (e.g. domain.loc)."
     echo "  deploy <domain>?              – Deploy generated certificates into the project and update trusted CA."
     echo "  test <client_name> <domain>   – Test connection using generated certificates."
     echo "  demo                          – Run full test scenario and cleanup."

@@ -28,13 +28,13 @@ Usage: utilca <command> [arguments]
 
 Commands:
   init                          – Initialize CA and create initial CRL.
-  server <domain>               – Generate server certificate (e.g. osbb.loc).
+  server <domain>               – Generate server certificate (e.g. domain.loc).
   client <name>                 – Generate client certificate (e.g. client1).
   revoke <SN>                   – Revoke a certificate (irreversible).
   list <role>?                  – Show list of certificates (role: server|client).
-  find <CN>                     – Find certificate (e.g. osbb.loc).
+  find <CN>                     – Find certificate (e.g. domain.loc).
   check <CN>?                   – Run validation scenario for all or one certificate 
-                                  (e.g. osbb.loc).
+                                  (e.g. domain.loc).
   deploy <domain>?              – Deploy generated certificates into the project and 
                                   update trusted CA.
   test <client_name> <domain>   – Test connection using generated certificates.
@@ -72,19 +72,19 @@ APP_DIR="/chose/location/for/utilca"
 
 ### Local Domains Configuration
 
-Since this utility is primarily for **local development**, you will likely need to configure your operating system's **`/etc/hosts`** file to resolve the domains you generate certificates for (e.g., `osbb.loc`) to your local machine:
+Since this utility is primarily for **local development**, you will likely need to configure your operating system's **`/etc/hosts`** file to resolve the domains you generate certificates for (e.g., `domain.loc`) to your local machine:
 
 ```bash
 # Example /etc/hosts configuration for local domains
 
 # Main domains
-127.0.0.1   domain1.loc
-127.0.0.1   www.domain1.loc
+127.0.0.1   domain.loc
+127.0.0.1   www.domain.loc
 
 # Subdomains
-127.0.0.1   img.domain1.loc
-127.0.0.1   dev.domain1.loc
-127.0.0.1   api.domain1.loc
+127.0.0.1   img.domain.loc
+127.0.0.1   dev.domain.loc
+127.0.0.1   api.domain.loc
 ```
 
 ### Nginx Configuration Example
@@ -129,7 +129,7 @@ The `deploy` command is intended to place certificates into your project structu
 ```
 var
 ├─ www
-    ├─ domain1.loc     // Your domain/project
+    ├─ domain.loc      // Your domain/project
     │  ├─ .ssl         // Target directory for deployed certificates
     │  │  ├─ ca.crt    // Root CA copied here
     │  │  ├─ server.crt
