@@ -50,17 +50,13 @@ Commands:
 
 You can run this utility from a **specific directory** where the script is located. In this case, you'll need minimal changes to configure it for your needs, apart from those related to your OS specifics.
 
-You might need to configure the `deploy` command. If you plan to use this functionality, you must specify the path to your **trusted CA certificates directory** in the environment variable `CA_TRUST_DIR`.
+You might need to configure the `deploy` command. If you plan to use this functionality, you must specify the path to your **trusted CA certificates directory** in the environment variable `CA_TRUST_DIR` (for: [Fedora](https://docs.fedoraproject.org/en-US/quick-docs/using-shared-system-certificates/), [Ubuntu](https://documentation.ubuntu.com/server/how-to/security/install-a-root-ca-certificate-in-the-trust-store/), etc).
 
 ```bash
-# Fedora
-# 
-# https://docs.fedoraproject.org/en-US/quick-docs/using-shared-system-certificates/
+# For Fedora
 CA_TRUST_DIR="/etc/pki/ca-trust/source/anchors"
 
-# Ubuntu
-# 
-# https://documentation.ubuntu.com/server/how-to/security/install-a-root-ca-certificate-in-the-trust-store/
+# For Ubuntu
 CA_TRUST_DIR="/usr/local/share/ca-certificates"
 ```
 
@@ -91,7 +87,7 @@ Since this utility is primarily for **local development**, you will likely need 
 
 For guidance on how to set up your local web server to use the generated certificates, refer to the provided Nginx configuration file:
 
-  * **`example.nginx.conf`**: Contains a complete example showing how to configure Nginx for multiple HTTPS subdomains, including HTTP-to-HTTPS redirection, static file serving, proxying to a development server (Vite/Vue), and setting up **Client Certificate Authentication** for an API endpoint.
+  * **`example.nginx.conf`**: Contains a complete [example](nginx/conf.d/example.domain.conf) showing how to configure Nginx for multiple HTTPS subdomains, including HTTP-to-HTTPS redirection, static file serving, proxying to a development server (Vite/Vue), and setting up **Client Certificate Authentication** for an API endpoint.
 
 
 ## Structure
@@ -104,22 +100,32 @@ The utility creates and manages the following file structure.
 utilca
 │
 ├─ ca
-│  ├─ issued          // Issued and revoked certificates
-│  ├─ crl             // Certificate Revocation List (CRL) index
+│  ├─ issued             // Issued and revoked certificates
+│  ├─ crl                // Certificate Revocation List (CRL) index
 │  │
-│  ├─ ca.crt          // Root CA Certificate
-│  ├─ ca.key          // CA Private Key
-│  ├─ ca.pass         // Password of the private key
-│  ├─ ca_signing.cnf  // CA Configuration
+│  ├─ ca.crt             // Root CA Certificate
+│  ├─ ca.key             // CA Private Key
+│  ├─ ca.pass            // Password of the private key
+│  ├─ ca_signing.cnf     // CA Configuration
 │  └─ ...
 │
-├─ client             // Client certificates
+├─ client                // Client certificates
 │  ├─ am-client
-│  └─ ...
+│  │  ├─ am-client.crt   // Certificate
+│  │  ├─ am-client.csr   // Certificate Signing Request
+│  │  ├─ am-client.ext   // Extensions config
+│  │  ├─ am-client.key   // Private Key
+│  │  ├─ am-client.p12   // PKCS#12 certificate (with password)
+│  │  └─ am-client.pass  // Password to PKCS#12 certificate
+│  ├─ ...
 │
-└─ server             // Server certificates
-   ├─ osbb.loc
-   └─ ...
+└─ server                // Server certificates
+   ├─ domain.loc
+   │  ├─ domain.loc.crt   // Certificate
+   │  ├─ domain.loc.csr   // Certificate Signing Request
+   │  ├─ domain.loc.ext   // Extensions config
+   │  ├─ domain.loc.key   // Private Key
+   ├─ ...
 ```
 
 ### Deployment Example (Target Project Structure)
@@ -144,4 +150,4 @@ var
     │  └─ .ssl
     │
     └─ ...
-`` `
+```
